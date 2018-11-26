@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using Steamworks;
 using UnityEngine.UI;
+using Mirror;
 
 public class Controller : MonoBehaviour {
 
@@ -49,6 +50,20 @@ public class Controller : MonoBehaviour {
 		
 	}
 
+
+    public void Disconnect()
+    {
+        if (Transport.layer.ClientConnected())
+        {
+            SteamNetworkManager.singleton.StopClient();
+        }
+        
+        if (Transport.layer.ServerActive())
+        {
+            SteamNetworkManager.singleton.StopHost();
+        }
+        
+    }
 
     public void StartAsHost()
     {
