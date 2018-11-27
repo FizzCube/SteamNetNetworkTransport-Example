@@ -19,16 +19,14 @@ namespace Mirror
         public CSteamID steamID;
         public ConnectionState state;
         public int connectionID;
-        public float lastPing = 0;
-        public float lastPong = 0;
+        public float lastRecv = 0;
 
         public SteamClient(ConnectionState state, CSteamID steamID, int connectionID)
         {
             this.state = state;
             this.steamID = steamID;
             this.connectionID = connectionID;
-            this.lastPing = Time.time;
-            this.lastPong = Time.time;
+            this.lastRecv = Time.time;
         }
     }
 
@@ -83,13 +81,8 @@ namespace Mirror
             EP2PSend.k_EP2PSendUnreliable
         };
 
-        private const int PING_FREQUENCY = 2;
-        private const int PONG_TIMEOUT = 30;
-
         private enum InternalMessages : byte
         {
-            PING,
-            PONG,
             DISCONNECT
         }
 
@@ -101,6 +94,13 @@ namespace Mirror
             CLIENT,
             SERVER
         }
+
+        //The amount of seconds After NetworkTime.PingFrequency before we deam a connection as timed out. We should receive messages at least as oftern as NetworkTime.PingFrequency! Default up to 1 second late
+        public static float connectedTimeoutBuffer = 5.0f;
+
+        private float clientConnectStarted;
+        //how long to wait before connect timeout
+        public static float clientConnectTimeout = 25.0f;
 
         //if we are in server or client mode
         private Mode mode = Mode.UNDEFINED;
@@ -123,19 +123,10 @@ namespace Mirror
 
         //this is a callback from steam that gets registered and called when the server receives new connections
         private Callback<P2PSessionRequest_t> callback_OnNewConnection = null;
+        //this is a callback from steam that gets registered and called when the ClientConnect fails
+        private Callback<P2PSessionConnectFail_t> callback_OnConnectFail = null;
 
         private int lastInternalMessageFrame = 0;
-
-        private ExponentialMovingAverage _rtt = new ExponentialMovingAverage(10);
-
-        // some arbitrary point in time where time started
-        private static readonly DateTime epoch = new DateTime(2018, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);
-        private static float LocalTime()
-        {
-            var now = DateTime.Now;
-            TimeSpan span = DateTime.Now.Subtract(epoch);
-            return (float)span.TotalSeconds;
-        }
 
 
         public int GetMaxPacketSize()
@@ -216,9 +207,11 @@ namespace Mirror
                 {
                     SteamClient steamClient = steamConnectionMap.fromConnectionID[connectionId];
 
+                    steamClient.lastRecv = Time.time;
+
                     if (steamClient.state == SteamClient.ConnectionState.CONNECTING)
                     {
-                        Debug.Log("Set connection state to connected");
+                        if (LogFilter.Debug) { Debug.Log("Set connection state to connected"); }
                         steamClient.state = SteamClient.ConnectionState.CONNECTED;
                     }
                 }
@@ -240,8 +233,8 @@ namespace Mirror
                 connectionId = steamClient.connectionID;
                 transportEvent = TransportEvent.Disconnected;
 
-                //remove the connection from our list
-                steamConnectionMap.Remove(steamClient);
+                //at this point we have completly disconnected from the client so stop accepting further messages from this client
+                SteamNetworking.CloseP2PSessionWithUser(steamClient.steamID);
 
                 return true;
             }
@@ -300,6 +293,9 @@ namespace Mirror
                         //check we have a record for this connection
                         steamClient = steamConnectionMap.fromSteamID[clientSteamID];
 
+                        //log when we last received a message for timeout purposes
+                        steamClient.lastRecv = Time.time;
+
                         if (steamClient.state == SteamClient.ConnectionState.CONNECTING)
                         {
                             if (LogFilter.Debug) { Debug.Log("Received a new connection"); }
@@ -335,9 +331,10 @@ namespace Mirror
                     {
                         if (packetSize == 0)
                         {
-                            Debug.LogError("SUPPRISE New connection");
+                            Debug.LogWarning("Unexpected packet from steam client");
 
-                            //ok so this happens when steam knows when we reconnect. we dont know about the client but steam has done the handshake before so we just have a blank hello message
+                            //ok so this happens when steam has previously accepted message from this client but they are not on our current list. This could be after quickly disconnecting a host and then starting it back up again for example.
+                            //It should be perfectly ok for this to happen in these types of circumstances
                             HandleNewConnection(clientSteamID);
                         }
                         else
@@ -435,7 +432,7 @@ namespace Mirror
         }
 
         /**
-         * Check for internal networked messages like ping or disconnect request
+         * Check for internal networked messages like disconnect request
          */
         private void handleInternalMessages()
         {
@@ -446,39 +443,24 @@ namespace Mirror
             lastInternalMessageFrame = Time.frameCount;
 
             int connectionId;
-            TransportEvent transportEvent;
             Byte[] data;
 
             while (ReceiveInternal(out connectionId, out data))
             {
                 try
                 {
+
                     SteamClient steamClient = steamConnectionMap.fromConnectionID[connectionId];
 
                     if (steamClient.state == SteamClient.ConnectionState.CONNECTED)
                     {
-                        float senderTime;
-
                         NetworkReader reader = new NetworkReader(data);
-                        switch (reader.ReadByte())
+                        byte message = reader.ReadByte();
+                        switch (message)
                         {
-                            case (byte)InternalMessages.PING:
-                                //ping .. send a pong
-                                senderTime = reader.ReadSingle();
-                                sendInternalPong(steamClient, senderTime);
-                                break;
-
-                            case (byte)InternalMessages.PONG:
-                                //pong .. update when we last received a pong
-                                senderTime = reader.ReadSingle();
-                                steamClient.lastPong = Time.time;
-
-                                double rtt = LocalTime() - senderTime;
-                                _rtt.Add(rtt);
-                                break;
-
                             case (byte)InternalMessages.DISCONNECT:
-                                if (LogFilter.Debug) { Debug.LogWarning("Received an instruction to Disconnect"); }
+                                if (LogFilter.Debug) { Debug.LogWarning("Received an instruction to Disconnect from " + steamClient.steamID); }
+
                                 //requested to disconnect
                                 if (mode == Mode.CLIENT || mode == Mode.SERVER)
                                 {
@@ -488,6 +470,10 @@ namespace Mirror
                                 break;
 
                         }
+                    }
+                    else
+                    {
+                        Debug.LogWarning("Received message for non connected client ?");
                     }
                 }
                 catch (KeyNotFoundException)
@@ -503,17 +489,12 @@ namespace Mirror
 
                 if (steamClient.state == SteamClient.ConnectionState.CONNECTED)
                 {
-                    if (Time.time - steamClient.lastPong > PONG_TIMEOUT)
+                    if ((Time.time - steamClient.lastRecv) > (NetworkTime.PingFrequency + connectedTimeoutBuffer))
                     {
                         //idle too long - disconnect
-                        Debug.LogError("Connection " + steamClient.connectionID + " timed out - going to disconnect");
+                        Debug.LogWarning("Connection " + steamClient.connectionID + " timed out - going to disconnect");
                         internalDisconnect(steamClient);
                         continue;
-                    }
-                    if (Time.time - steamClient.lastPing > PING_FREQUENCY)
-                    {
-                        //time to ping
-                        sendInternalPing(steamClient);
                     }
                 }
             }
@@ -532,8 +513,6 @@ namespace Mirror
                 steamDisconnectedConnections.Enqueue(steamClient);
             }
 
-            SteamNetworking.CloseP2PSessionWithUser(steamClient.steamID);
-
         }
 
         /**
@@ -541,38 +520,13 @@ namespace Mirror
          */
         private void internalDisconnect(SteamClient steamClient)
         {
-            Debug.LogError("internalDisconnect");
             if (steamClient.state == SteamClient.ConnectionState.CONNECTED)
             {
-                Debug.LogError("internalDisconnect a");
+                if (LogFilter.Debug) { Debug.Log("Send internal disconnect message to " + steamClient); }
                 Send(steamClient, disconnectMsgBuffer, (int)SteamChannels.SEND_INTERNAL, Channels.DefaultReliable);
             }
 
             closeSteamConnection(steamClient);
-        }
-
-        private void sendInternalPing(SteamClient steamClient)
-        {
-            if (LogFilter.Debug) { Debug.Log("Send Ping to connection " + steamClient.connectionID); }
-
-            steamClient.lastPing = Time.time;
-
-            NetworkWriter writer = new NetworkWriter();
-            writer.Write((byte)InternalMessages.PING);
-            writer.Write(LocalTime());
-
-            Send(steamClient, writer.ToArray(), (int)SteamChannels.SEND_INTERNAL, Channels.DefaultReliable);
-        }
-
-        private void sendInternalPong(SteamClient steamClient, float senderTime)
-        {
-            if (LogFilter.Debug) { Debug.Log("Send Pong to connection " + steamClient.connectionID); }
-
-            NetworkWriter writer = new NetworkWriter();
-            writer.Write((byte)InternalMessages.PONG);
-            writer.Write(senderTime);
-
-            Send(steamClient, writer.ToArray(), (int)SteamChannels.SEND_INTERNAL, Channels.DefaultReliable);
         }
 
         private void setupSteamCallbacks()
@@ -582,7 +536,10 @@ namespace Mirror
                 if (callback_OnNewConnection == null)
                 {
                     callback_OnNewConnection = Callback<P2PSessionRequest_t>.Create(OnNewConnection);
-                    Callback<P2PSessionConnectFail_t>.Create(OnConnectFail);
+                }
+                if (callback_OnConnectFail == null)
+                {
+                    callback_OnConnectFail = Callback<P2PSessionConnectFail_t>.Create(OnConnectFail);
                 }
             }
             else
@@ -595,25 +552,11 @@ namespace Mirror
 
         private void OnConnectFail(P2PSessionConnectFail_t result)
         {
-            if (LogFilter.Debug) { Debug.LogWarning("Connection failed or closed Steam ID " + result.m_steamIDRemote); }
+            if (true) { Debug.LogWarning("Connection failed or closed Steam ID " + result.m_steamIDRemote); }
 
             if (mode == Mode.CLIENT)
             {
                 ClientDisconnect();
-            }
-            else if (mode == Mode.SERVER)
-            {
-                //one of the clients has disconnected
-                SteamClient steamClient;
-                try
-                {
-                    steamClient = steamConnectionMap.fromSteamID[result.m_steamIDRemote];
-                    closeSteamConnection(steamClient);
-                }
-                catch (KeyNotFoundException)
-                {
-                    steamClient = null;
-                }
             }
         }
 
@@ -639,6 +582,7 @@ namespace Mirror
                 }
 
                 //currently in disconnecting state. Dont accept another connection
+                SteamNetworking.CloseP2PSessionWithUser(steamID);
                 return;
             }
             catch (KeyNotFoundException)
@@ -648,8 +592,8 @@ namespace Mirror
             if ((mode == Mode.SERVER && getNumberOfActiveConnection() >= maxConnections) || (mode == Mode.CLIENT && steamID != steamClientServer.steamID))
             {
                 //TODO error report?
-                //either too many people connecting to server Or we are a client! Dont accept
-
+                //either too many people connecting to server Or we are a client and someone else is tryign to connect! Dont accept
+                SteamNetworking.CloseP2PSessionWithUser(steamID);
                 return;
             }
 
@@ -698,6 +642,8 @@ namespace Mirror
 
             mode = Mode.CLIENT;
 
+            clientConnectStarted = Time.time;
+
             int connectionId = nextConnectionID++;
             steamClientServer = steamConnectionMap.Add(steamID, connectionId, SteamClient.ConnectionState.CONNECTING);
 
@@ -718,7 +664,6 @@ namespace Mirror
 
         public void ClientDisconnect()
         {
-            Debug.LogError("ClientDisconnect");
             if (steamClientServer == null || mode != Mode.CLIENT)
             {
                 return;
@@ -726,7 +671,6 @@ namespace Mirror
 
             if (steamClientServer.state == SteamClient.ConnectionState.CONNECTED || steamClientServer.state == SteamClient.ConnectionState.CONNECTING)
             {
-                Debug.LogError("ClientDisconnect a");
                 internalDisconnect(steamClientServer);
             }
 
@@ -749,9 +693,6 @@ namespace Mirror
                 if (LogFilter.Debug) { Debug.Log("We are currently trying to disconnect - so, disconnect"); }
                 transportEvent = TransportEvent.Disconnected;
 
-                //remove the connection from our list
-                steamConnectionMap.Remove(steamClientServer);
-
                 //make sure we dont communicate any more
                 SteamNetworking.CloseP2PSessionWithUser(steamClientServer.steamID);
 
@@ -759,6 +700,14 @@ namespace Mirror
                 steamClientServer = null;
                 mode = Mode.UNDEFINED;
                 return true;
+            }
+
+            if (steamClientServer.state == SteamClient.ConnectionState.CONNECTING && Time.time - clientConnectStarted > clientConnectTimeout)
+            {
+                Debug.LogWarning("Timeout while connecting..");
+
+                ClientDisconnect();
+                return false;
             }
 
             //if we are not connecting or connected then we shouldnt get getting messages - exit here
@@ -775,7 +724,7 @@ namespace Mirror
 
         public float ClientGetRTT()
         {
-            return (float)_rtt.Value;
+            return (float)NetworkTime.rtt;
         }
 
         public bool ClientSend(int sendType, byte[] data)
@@ -903,6 +852,9 @@ namespace Mirror
                 if (LogFilter.Debug) { Debug.Log("Attempting to disconnect SteamID:" + connectionId); }
 
                 SteamClient steamClient = steamConnectionMap.fromConnectionID[connectionId];
+
+                //remove the connection from our list
+                steamConnectionMap.Remove(steamClient);
 
                 if (steamClient.state == SteamClient.ConnectionState.CONNECTED || steamClient.state == SteamClient.ConnectionState.CONNECTING)
                 {
