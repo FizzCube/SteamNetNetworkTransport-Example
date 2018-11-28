@@ -792,13 +792,13 @@ MonoBehaviour:
   m_NetworkAddress: localhost
   m_DontDestroyOnLoad: 1
   m_RunInBackground: 1
-  m_ShowDebugMessages: 0
+  m_ShowDebugMessages: 1
   m_PlayerPrefab: {fileID: 1673388734458602, guid: 6260fbd47b3a6324199b76841672e0a7,
     type: 2}
   m_AutoCreatePlayer: 1
   m_PlayerSpawnMethod: 0
-  m_OfflineScene: 
-  m_OnlineScene: 
+  m_OfflineScene: main
+  m_OnlineScene: game
   m_SpawnPrefabs: []
   m_MaxConnections: 4
   m_UseWebSockets: 0
@@ -1568,7 +1568,7 @@ MonoBehaviour:
     m_BestFit: 0
     m_MinSize: 10
     m_MaxSize: 40
-    m_Alignment: 7
+    m_Alignment: 6
     m_AlignByGeometry: 0
     m_RichText: 1
     m_HorizontalOverflow: 0
@@ -1577,7 +1577,8 @@ MonoBehaviour:
   m_Text: "Instructions: \n*On the 1st computer run this program and press Host Game\n*On
     the 2nd+ computer run this program and press Select the hosts steam name from
     your friend list and then press Connect to Friend.\n\nNote: \n*Takes a couple
-    of seconds to connect. \n*Use Arrow Keys or Controller to move your player. \n*If
+    of seconds to connect. \n*There is a reasonably large game scene to test loading
+    a large scene on connect\n*Use Arrow Keys or Controller to move your player. \n*If
     you dont see it saying your steam name because steamworks.net isnt working then
     you may have to add the build executable to the steam client as a \"non steam
     game\""
