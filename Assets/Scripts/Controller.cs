@@ -9,6 +9,7 @@ public class Controller : MonoBehaviour {
 
     public Text labelUser;
     public Dropdown dropdownSteamFriends;
+    public Text ipAddress;
 
     List<CSteamID> friendSteamIDs = new List<CSteamID>();
 
@@ -67,14 +68,29 @@ public class Controller : MonoBehaviour {
 
     public void StartAsHost()
     {
+        Transport.layer = SteamNetworkManager.steam;
+        SteamNetworkManager.singleton.StartHost();
+    }
+
+    public void StartAsHostTelepathy()
+    {
+        Transport.layer = SteamNetworkManager.telepathy;
         SteamNetworkManager.singleton.StartHost();
     }
 
     public void StartAsClient()
     {
+        Transport.layer = SteamNetworkManager.steam;
         Debug.Log("connect to friend index " + dropdownSteamFriends.value);
         Debug.Log("connect to friend steam ID " + friendSteamIDs[dropdownSteamFriends.value].ToString());
         SteamNetworkManager.singleton.networkAddress = friendSteamIDs[dropdownSteamFriends.value].ToString();
+        SteamNetworkManager.singleton.StartClient();
+    }
+
+    public void StartAsClientTelepathy()
+    {
+        Transport.layer = SteamNetworkManager.telepathy;
+        SteamNetworkManager.singleton.networkAddress = ipAddress.text;
         SteamNetworkManager.singleton.StartClient();
     }
 
